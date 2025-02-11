@@ -1,10 +1,16 @@
 # %%
+import functools
+import os
 import typing as tp
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 import torch
 from datasets import load_dataset
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
 from tqdm import tqdm
 from transformers import AutoTokenizer, SwitchTransformersEncoderModel
 
@@ -24,6 +30,24 @@ data = load_dataset("universal_dependencies", "en_ewt")
 
 
 # %% Get token probs for all tokens in all layers
+
+
+def cache_to_file(func):
+    @functools.wraps(func)
+    def wrapper(*args, filename: str | None = None, compress: bool = True, **kwargs):
+        if filename and os.path.exists(filename):
+            print(f"Loading {filename}")
+            return pd.read_parquet(filename)
+        print(f"Computing {func.__name__}")
+        df = func(*args, **kwargs)
+        if filename:
+            print(f"Saving {filename}")
+            df.to_parquet(filename, compression="gzip" if compress else None)
+        return df
+
+    return wrapper
+
+
 def map_input_ids_to_tokens(
     decoded_tokens: list[str], sent_tokens: list[str]
 ) -> list[int]:
@@ -102,33 +126,89 @@ def iter_sentence(
         yield row
 
 
-data_subset = data["train"]
-rows = []
-for sent_id, datum in tqdm(enumerate(data_subset), total=len(data_subset)):
-    for entry in iter_sentence(model, tokenizer, datum):
-        entry = {"sentence_id": sent_id, **entry}
-        rows.append(entry)
+@cache_to_file
+def subset_to_df(data_subset: tp.Any) -> pd.DataFrame:
+    rows = []
+    for sent_id, datum in tqdm(enumerate(data_subset), total=len(data_subset)):
+        for entry in iter_sentence(model, tokenizer, datum):
+            entry = {"sentence_id": sent_id, **entry}
+            rows.append(entry)
+
+    df = pd.DataFrame(rows)
+
+    def integers_to_one_hot(arr, n):
+        result = np.zeros(len(arr) * n)
+        result[np.arange(len(arr)) * n + arr] = 1
+        return result
+
+    def create_route_vector(row):
+        experts = np.array([row[f"expert_id_{i}"] for i in range(1, 12, 2)])
+        return integers_to_one_hot(experts, 8)
+
+    df["route_vector"] = df.apply(create_route_vector, axis=1)
+
+    return df
 
 
-df = pd.DataFrame(rows)
-df.to_parquet("ud_train_routes.parquet.gzip", compression="gzip")
-# %%
-df = pd.read_parquet("ud_routes_train.parquet.gzip")
+df = subset_to_df(data_subset=data["train"], filename="ud_train_routes.parquet.gzip")
+df.head()
 
 
-def int_to_binary_vector(n, length=3):
-    return np.array([int(x) for x in f"{n:0{length}b}"])
+# %%  # Plot
+def plot_routes_by_category(
+    df,
+    route_col="route_vector",
+    cat_col="xpos",
+    method="tsne",
+    dimensions=2,
+):
+    # Dimensionality reduction
+    if method.lower() == "tsne":
+        reducer = TSNE(n_components=dimensions, random_state=42)
+    elif method.lower() == "pca":
+        reducer = PCA(n_components=dimensions)
+    else:
+        raise ValueError("method must be 'tsne' or 'pca'")
+
+    routes_reduced = reducer.fit_transform(np.stack(df[route_col].values))
+
+    if dimensions == 2:
+        # Create 2D seaborn plot
+        plot_df = pd.DataFrame(
+            {
+                "x": routes_reduced[:, 0],
+                "y": routes_reduced[:, 1],
+                "category": df[cat_col],
+            }
+        )
+        plt.figure(figsize=(10, 8))
+        sns.scatterplot(data=plot_df, x="x", y="y", hue="category", alpha=0.6)
+        plt.title(f"Route Vectors Clustered by {cat_col} ({method.upper()})")
+        plt.show()
+
+    elif dimensions == 3:
+        # Create 2D or 3D plotly plot
+        import plotly.express as px
+
+        plot_df = pd.DataFrame(
+            {
+                "x": routes_reduced[:, 0],
+                "y": routes_reduced[:, 1],
+                "category": df[cat_col],
+            }
+        )
+        plot_df["z"] = routes_reduced[:, 2]
+        fig = px.scatter_3d(
+            plot_df,
+            x="x",
+            y="y",
+            z="z",
+            color="category",
+            opacity=0.6,
+            title=f"Route Vectors Clustered by {cat_col} ({method.upper()})",
+        )
+        fig.show()
 
 
-def create_route_vector(row):
-    binary_vectors = []
-    for i in range(1, 12, 2):
-        expert_id = row[f"expert_id_{i}"]
-        binary_vectors.append(int_to_binary_vector(expert_id))
-    return np.concatenate(binary_vectors)
-
-
-df["route_vector"] = df.apply(create_route_vector, axis=1)
-df.to_parquet("ud_train_routes.parquet.gzip", compression="gzip")
-
+plot_routes_by_category(df, cat_col="XPOS", method="tsne", dimensions=2)
 # %%
