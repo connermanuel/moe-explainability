@@ -154,14 +154,14 @@ df = subset_to_df(data_subset=data["train"], filename="ud_train_routes.parquet.g
 df.head()
 
 
-# %%  # Plot
-def plot_routes_by_category(
-    df,
-    route_col="route_vector",
-    cat_col="xpos",
-    method="tsne",
-    dimensions=2,
-):
+# %% Plot
+@cache_to_file
+def reduce_routes(
+    df: pd.DataFrame,
+    route_col: str,
+    method: str = "tsne",
+    dimensions: int = 2,
+) -> pd.DataFrame:
     # Dimensionality reduction
     if method.lower() == "tsne":
         reducer = TSNE(n_components=dimensions, random_state=42)
@@ -170,7 +170,27 @@ def plot_routes_by_category(
     else:
         raise ValueError("method must be 'tsne' or 'pca'")
 
+    print(
+        f"Reducing {df.shape[0]} routes to {dimensions} dimensions using {method.upper()}"
+    )
     routes_reduced = reducer.fit_transform(np.stack(df[route_col].values))
+    return pd.DataFrame(routes_reduced, columns=[f"dim_{i}" for i in range(dimensions)])
+
+
+def plot_routes_by_category(
+    df,
+    route_col="route_vector",
+    cat_col="xpos",
+    method="tsne",
+    dimensions=2,
+):
+    # Get reduced dimensions from cache or compute them
+    cache_file = f"routes_reduced/{method}_{dimensions}d.parquet.gzip"
+    routes_reduced_df = reduce_routes(
+        df, route_col, method, dimensions, filename=cache_file
+    )
+    routes_reduced = routes_reduced_df.values
+    print("Reduction complete.")
 
     if dimensions == 2:
         # Create 2D seaborn plot
