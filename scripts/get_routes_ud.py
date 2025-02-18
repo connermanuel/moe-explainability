@@ -10,7 +10,7 @@ import seaborn as sns
 import torch
 from datasets import load_dataset
 from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
+from sklearn.metrics import silhouette_samples, silhouette_score
 from tqdm import tqdm
 from transformers import AutoTokenizer, SwitchTransformersEncoderModel
 
@@ -154,7 +154,7 @@ df = subset_to_df(data_subset=data["train"], filename="ud_train_routes.parquet.g
 df.head()
 
 
-# %% Plot
+# %% Plotting function
 @cache_to_file
 def reduce_routes(
     df: pd.DataFrame,
@@ -164,7 +164,14 @@ def reduce_routes(
 ) -> pd.DataFrame:
     # Dimensionality reduction
     if method.lower() == "tsne":
-        reducer = TSNE(n_components=dimensions, random_state=42)
+        if dimensions == 2:
+            from tsnecuda import TSNE
+        else:
+            from sklearn.manifold import TSNE
+
+            print("Using sklearn.manifold.TSNE for 3D t-SNE. This will be slow.")
+
+        reducer = TSNE(n_components=dimensions, random_seed=42)
     elif method.lower() == "pca":
         reducer = PCA(n_components=dimensions)
     else:
@@ -177,6 +184,40 @@ def reduce_routes(
     return pd.DataFrame(routes_reduced, columns=[f"dim_{i}" for i in range(dimensions)])
 
 
+def analyze_clusters(routes_reduced, categories, filename: str = None) -> pd.DataFrame:
+    # Calculate silhouette scores
+    @cache_to_file
+    def get_sample_scores_df(routes_reduced, categories):
+        sil_samples = silhouette_samples(routes_reduced, categories)
+
+        # Get per-cluster scores
+        cluster_scores = {}
+        unique_categories = np.unique(categories)
+        for category in tqdm(unique_categories):
+            mask = categories == category
+            cluster_scores[category] = np.mean(sil_samples[mask])
+
+        # Convert to dataframe for nice display
+        scores_df = pd.DataFrame(
+            {
+                "Category": cluster_scores.keys(),
+                "Silhouette Score": cluster_scores.values(),
+            }
+        ).sort_values("Silhouette Score", ascending=False)
+        return scores_df
+
+    # Print overall and per-cluster scores
+    print(
+        f"Overall Silhouette Score: {silhouette_score(routes_reduced, categories):.3f}"
+    )
+
+    scores_df = get_sample_scores_df(routes_reduced, categories, filename=filename)
+    print("\nPer-category Silhouette Scores:")
+    print(scores_df)
+
+    return scores_df
+
+
 def plot_routes_by_category(
     df,
     route_col="route_vector",
@@ -185,12 +226,18 @@ def plot_routes_by_category(
     dimensions=2,
 ):
     # Get reduced dimensions from cache or compute them
-    cache_file = f"routes_reduced/{method}_{dimensions}d.parquet.gzip"
+    cache_file_routes = f"routes_reduced/{method}_{dimensions}d.parquet.gzip"
     routes_reduced_df = reduce_routes(
-        df, route_col, method, dimensions, filename=cache_file
+        df, route_col, method, dimensions, filename=cache_file_routes
     )
     routes_reduced = routes_reduced_df.values
     print("Reduction complete.")
+
+    # Add cluster analysis
+    print("\nAnalyzing clusters...")
+
+    # cache_file_scores = f"silhouette_scores/{method}_{dimensions}d.parquet.gzip"
+    # analyze_clusters(routes_reduced, df[cat_col].values, filename=cache_file_scores)
 
     if dimensions == 2:
         # Create 2D seaborn plot
@@ -198,7 +245,7 @@ def plot_routes_by_category(
             {
                 "x": routes_reduced[:, 0],
                 "y": routes_reduced[:, 1],
-                "category": df[cat_col],
+                "category": df[cat_col].astype(str),
             }
         )
         plt.figure(figsize=(10, 8))
@@ -214,10 +261,10 @@ def plot_routes_by_category(
             {
                 "x": routes_reduced[:, 0],
                 "y": routes_reduced[:, 1],
-                "category": df[cat_col],
+                "z": routes_reduced[:, 2],
+                "category": df[cat_col].astype(str),
             }
         )
-        plot_df["z"] = routes_reduced[:, 2]
         fig = px.scatter_3d(
             plot_df,
             x="x",
@@ -227,8 +274,22 @@ def plot_routes_by_category(
             opacity=0.6,
             title=f"Route Vectors Clustered by {cat_col} ({method.upper()})",
         )
+        fig.update_traces(marker_size=3)
         fig.show()
 
 
-plot_routes_by_category(df, cat_col="XPOS", method="tsne", dimensions=2)
 # %%
+plot_routes_by_category(df, cat_col="upos", method="pca", dimensions=3)
+# %%
+
+# 3D tensor: (tokens, layers, experts)
+# How many times did you see his particular token get routed through i'th layer's k'th expert?
+# Instead of taking the counts, you can consider the activation probabilities
+# Use types, not tokens -> collapse by type and for now take in the most common pos tag
+# Probably want to do k-means cluster agnostic to POS tag, then ask - is there homogeneity in terms of syntatic tags?
+# Benefits:
+# - do tensor decomposition
+# - low dimensional representations of every token
+# - maybe we can start with atomic subwords
+# - for switch-base-8, there arent a lot of layers and experts so dimensionality reduction is not needed
+# - We can do clustering on 2D slices of this tensor (e.g. choose one layer or choose one expert)
