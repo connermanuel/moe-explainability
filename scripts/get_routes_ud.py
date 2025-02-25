@@ -2,13 +2,16 @@
 import functools
 import os
 import typing as tp
+from collections import Counter
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
 import torch
+import torch.nn.functional as F
 from datasets import load_dataset
+from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_samples, silhouette_score
 from tqdm import tqdm
@@ -78,6 +81,7 @@ def iter_sentence(
     tokenizer: AutoTokenizer,
     datum: dict[str],
     device: str = "cuda",
+    normalize: bool = True,
 ) -> tp.Iterator[dict[str, str]]:
     """Iterate through the tokens of an entry from UD and return the expert number for each token in each layer."""
     # Tokenize the input sentences
@@ -120,37 +124,38 @@ def iter_sentence(
         }
         for layer_num in range(len(router_probs)):
             if layer_num % 2 == 1:
-                row[f"expert_id_{layer_num}"] = router_probs[layer_num][1][
-                    0, decoded_token_id
-                ].item()
+                probs = router_probs[layer_num][0][0][decoded_token_id]
+                if normalize:
+                    probs = F.softmax(probs, dim=0)
+                probs = probs.cpu().numpy()
+                row[f"expert_{layer_num}"] = probs
         yield row
 
 
 @cache_to_file
-def subset_to_df(data_subset: tp.Any) -> pd.DataFrame:
+def subset_to_df(data_subset: tp.Any, normalize: bool = True) -> pd.DataFrame:
     rows = []
     for sent_id, datum in tqdm(enumerate(data_subset), total=len(data_subset)):
-        for entry in iter_sentence(model, tokenizer, datum):
+        for entry in iter_sentence(model, tokenizer, datum, normalize=normalize):
             entry = {"sentence_id": sent_id, **entry}
             rows.append(entry)
 
     df = pd.DataFrame(rows)
 
-    def integers_to_one_hot(arr, n):
-        result = np.zeros(len(arr) * n)
-        result[np.arange(len(arr)) * n + arr] = 1
-        return result
-
-    def create_route_vector(row):
-        experts = np.array([row[f"expert_id_{i}"] for i in range(1, 12, 2)])
-        return integers_to_one_hot(experts, 8)
+    def create_route_vector(row) -> np.ndarray:
+        all_probs = [row[f"expert_{i}"] for i in range(1, 12, 2)]
+        return np.concatenate(all_probs)
 
     df["route_vector"] = df.apply(create_route_vector, axis=1)
 
     return df
 
 
-df = subset_to_df(data_subset=data["train"], filename="ud_train_routes.parquet.gzip")
+df = subset_to_df(
+    data_subset=data["train"],
+    normalize=False,
+    filename="ud_train_route_logits.parquet.gzip",
+)
 df.head()
 
 
@@ -162,6 +167,8 @@ def reduce_routes(
     method: str = "tsne",
     dimensions: int = 2,
 ) -> pd.DataFrame:
+    """Reduce the route vectors to 2D or 3D using t-SNE or PCA.
+    Returns a DataFrame with the reduced dimensions."""
     # Dimensionality reduction
     if method.lower() == "tsne":
         if dimensions == 2:
@@ -222,22 +229,13 @@ def plot_routes_by_category(
     df,
     route_col="route_vector",
     cat_col="xpos",
-    method="tsne",
+    method="pca",
     dimensions=2,
 ):
     # Get reduced dimensions from cache or compute them
-    cache_file_routes = f"routes_reduced/{method}_{dimensions}d.parquet.gzip"
-    routes_reduced_df = reduce_routes(
-        df, route_col, method, dimensions, filename=cache_file_routes
-    )
+    # cache_file_routes = f"routes_reduced/{method}_{dimensions}d.parquet.gzip"
+    routes_reduced_df = reduce_routes(df, route_col, method, dimensions)
     routes_reduced = routes_reduced_df.values
-    print("Reduction complete.")
-
-    # Add cluster analysis
-    print("\nAnalyzing clusters...")
-
-    # cache_file_scores = f"silhouette_scores/{method}_{dimensions}d.parquet.gzip"
-    # analyze_clusters(routes_reduced, df[cat_col].values, filename=cache_file_scores)
 
     if dimensions == 2:
         # Create 2D seaborn plot
@@ -278,9 +276,8 @@ def plot_routes_by_category(
         fig.show()
 
 
-# %%
-plot_routes_by_category(df, cat_col="upos", method="pca", dimensions=3)
-# %%
+# %% Notes
+
 
 # 3D tensor: (tokens, layers, experts)
 # How many times did you see his particular token get routed through i'th layer's k'th expert?
@@ -293,3 +290,106 @@ plot_routes_by_category(df, cat_col="upos", method="pca", dimensions=3)
 # - maybe we can start with atomic subwords
 # - for switch-base-8, there arent a lot of layers and experts so dimensionality reduction is not needed
 # - We can do clustering on 2D slices of this tensor (e.g. choose one layer or choose one expert)
+
+
+def collapse_df_by_input_id(df: pd.DataFrame) -> pd.DataFrame:
+    def mode(x):
+        try:
+            return x.value_counts().idxmax()
+        except ValueError:
+            return None
+
+    agg_dict = {
+        "decoded_token": "first",
+        "xpos": mode,
+        "upos": mode,
+        "route_vector": "mean",
+        "sentence_id": "count",
+    }
+    for i in range(1, 12, 2):
+        agg_dict[f"expert_{i}"] = "mean"
+
+    df_collapsed = df.groupby("input_id").agg(agg_dict).reset_index()
+    df_collapsed = df_collapsed.rename(columns={"sentence_id": "count"})
+    return df_collapsed
+
+
+df_types = collapse_df_by_input_id(df)
+df_types.head()
+
+
+# %% Cluster and analyze by POS
+def cluster_and_analyze(
+    df: pd.DataFrame,
+    data_col: str,
+    list_cats: list[str],
+    k: int,
+    display_dims: int = 3,
+):
+    """
+    Performs k-means clustering on the vectors in `data_col` of the DataFrame `df`,
+    then analyzes the distribution of values in `list_cats` within each cluster.
+    Finally, plots the clusters using `plot_routes_by_category`.
+    """
+
+    df = df.copy()
+    X = np.stack(df[data_col].values)
+    kmeans = KMeans(n_clusters=k, random_state=42, n_init="auto")
+    df["cluster"] = kmeans.fit_predict(X).astype(str)
+
+    for cluster_id in range(k):
+        print(f"\n--- Cluster {cluster_id} ---")
+        cluster_df = df[df["cluster"] == str(cluster_id)]
+
+        for cat_col in list_cats:
+            most_common = Counter(cluster_df[cat_col]).most_common(5)
+            most_common_props = {k: v / len(cluster_df) for k, v in most_common}
+            print(f"\nTop 5 most common '{cat_col}' values:")
+            for k, v in most_common_props.items():
+                print(f"{k}: {v:.2%}")
+
+    plot_routes_by_category(
+        df, route_col=data_col, cat_col="cluster", method="pca", dimensions=display_dims
+    )
+
+
+def filter_df(df: pd.DataFrame) -> pd.DataFrame:
+    return df[~df["input_id"].isin([1, 3])]
+
+
+cluster_and_analyze(
+    df=filter_df(df_types), data_col="expert_1", list_cats=["xpos"], k=8, display_dims=3
+)
+
+# %%
+
+df_unnorm = subset_to_df(
+    data_subset=data["train"],
+    normalize=False,
+    filename="ud_train_route_logits.parquet.gzip",
+)
+df_types_unnorm = collapse_df_by_input_id(df_unnorm)
+df_types_unnorm.head()
+
+cluster_and_analyze(
+    df=filter_df(df_types_unnorm),
+    data_col="expert_1",
+    list_cats=["xpos"],
+    k=8,
+    display_dims=3,
+)
+
+# %%
+# Null hypothesis - every cluster should be uniform over tags / no systematicity
+# or at least proportional to the frequency of tags in the dataset
+# If there is systematicity, divergence from uniform should be high
+# You can rank clusters by divergence from uniformity in a few ways
+# - KL divergence
+# - Chi-square test
+# - Kolmogorov-Smirnov test
+# - Pick clusters which are extremeley non-uniform
+# You could also bootstrap from the dataset = e.g. sample with replacement and recompute the divergence
+# Problem: clusters from different runs of k-means are not the same and don't map one-to-one
+
+# How does position of token inside a word (e.g. subword token vs atomic token) affect routing?
+# some TF-IDF statistic on the tokens
