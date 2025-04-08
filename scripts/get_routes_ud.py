@@ -75,18 +75,18 @@ def map_decoded_tokens_to_sent_tokens(
 
     Returns a list L where L[i] is the index of the sentence token that the i-th decoded token belongs to."""
     mapping = []
-    token_idx = 0
-    sent_token = sent_tokens[token_idx]
-    token_accum = ""
+    sent_token_idxs = sum(
+        [[i] * len(sent_tokens[i]) for i in range(len(sent_tokens))], []
+    )
 
+    total_len = 0
     for decoded_token in decoded_tokens:
-        token_accum += decoded_token
-        mapping.append(token_idx)
-        if token_accum == sent_token:
-            token_idx += 1
-            if token_idx < len(sent_tokens):
-                sent_token = sent_tokens[token_idx]
-            token_accum = ""
+        total_len += len(decoded_token)
+        try:
+            mapped = sent_token_idxs[total_len - 1]
+        except IndexError:
+            mapped = -1
+        mapping.append(mapped)
 
     return mapping
 
@@ -187,6 +187,13 @@ def extract_token_routes_df(
     df["route_vector"] = df.apply(create_route_vector, axis=1)
 
     return df
+
+
+def get_unaligned_tokens(df: pd.DataFrame) -> pd.DataFrame:
+    mask_1 = df.apply(lambda x: x["decoded_token"] not in x["sent_token"], axis=1)
+    mask_2 = df.apply(lambda x: x["sent_token"] not in x["decoded_token"], axis=1)
+    mask_3 = df["sent_token_position"] != -1
+    return df[mask_1 & mask_2 & mask_3]
 
 
 # %% Data Preprocessing
@@ -449,7 +456,7 @@ if __name__ == "__main__":
         model,
         tokenizer,
         data_subset=data["train"],
-        filename="data/switch_base_8_ud_train_token_routes_normalized.parquet.gzip",
+        filename="scripts/data/switch_base_8_ud_train_token_routes_normalized.parquet.gzip",
     )
     df_types = collapse_df_by_input_id(df)
     df_types_filtered = filter_df(df_types)
@@ -459,19 +466,19 @@ if __name__ == "__main__":
         tokenizer,
         data_subset=data["train"],
         normalize=False,
-        filename="data/switch_base_8_ud_train_token_routes_raw.parquet.gzip",
+        filename="scripts/data/switch_base_8_ud_train_token_routes_raw.parquet.gzip",
     )
     df_types_unnorm = collapse_df_by_input_id(df_unnorm)
     df_types_unnorm_filtered = filter_df(df_types_unnorm)
 
-    # # Example analyses
-    # cluster_and_analyze(
-    #     df=df_types_filtered,
-    #     data_col="expert_1",
-    #     list_cats=["xpos"],
-    #     num_clusters=8,
-    #     display_dims=3,
-    # )
+    # Example analyses
+    cluster_and_analyze(
+        df=df_types_filtered,
+        data_col="expert_1",
+        list_cats=["xpos"],
+        n_clusters=8,
+        display_dims=3,
+    )
 
     # %% Cluster by different numbers of clusters
     df_multiple_clusterings = df_unnorm.copy()
