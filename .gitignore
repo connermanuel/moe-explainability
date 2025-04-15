@@ -1,0 +1,3 @@
+*.parquet*
+routes_reduced
+silhouette_scores
