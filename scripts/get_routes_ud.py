@@ -456,7 +456,7 @@ if __name__ == "__main__":
         model,
         tokenizer,
         data_subset=data["train"],
-        filename="scripts/data/switch_base_8_ud_train_token_routes_normalized.parquet.gzip",
+        filename="data/switch_base_8_ud_train_token_routes_normalized.parquet.gzip",
     )
     df_types = collapse_df_by_input_id(df)
     df_types_filtered = filter_df(df_types)
@@ -466,7 +466,7 @@ if __name__ == "__main__":
         tokenizer,
         data_subset=data["train"],
         normalize=False,
-        filename="scripts/data/switch_base_8_ud_train_token_routes_raw.parquet.gzip",
+        filename="data/switch_base_8_ud_train_token_routes_raw.parquet.gzip",
     )
     df_types_unnorm = collapse_df_by_input_id(df_unnorm)
     df_types_unnorm_filtered = filter_df(df_types_unnorm)
