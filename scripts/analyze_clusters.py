@@ -7,14 +7,15 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from datasets import load_dataset
-from get_routes_ud import (
+from sklearn.cluster import KMeans
+from tqdm import tqdm
+
+from scripts.get_routes.get_routes import (
     collapse_df_by_input_id,
     extract_token_routes_df,
     filter_df,
     load_model_and_tokenizer,
 )
-from sklearn.cluster import KMeans
-from tqdm import tqdm
 
 # %% Load model and data
 model_name = "google/switch-base-8"
@@ -282,7 +283,7 @@ def test_batch_sizes(
 
             # If we hit memory issues, skip larger batch sizes
             if isinstance(e, MemoryError) or stop_event.is_set():
-                print(f"Stopping tests as memory usage is growing too quickly")
+                print("Stopping tests as memory usage is growing too quickly")
                 break
 
     # Filter out incomplete results for plotting
