@@ -2,3 +2,4 @@
 routes_reduced
 silhouette_scores
 __pycache__
+*.egg-info
