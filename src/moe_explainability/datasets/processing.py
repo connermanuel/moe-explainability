@@ -118,3 +118,50 @@ def aggregate_by_token_id(df: pd.DataFrame) -> pd.DataFrame:
     result = result.rename(columns={"count": "occurrence_count"})
 
     return result
+
+
+def process_structured_data(
+    data: list[dict[str, Any]], 
+    text_field: str,
+    extract_fn: Callable[[str], list[Token]],
+    extra_fields: list[str] | None = None
+) -> pd.DataFrame:
+    """Process structured data (like UD) using general functions.
+    
+    Args:
+        data: List of dictionaries with structured data
+        text_field: Key containing the text to process
+        extract_fn: Function to extract tokens from text
+        extra_fields: Additional fields to include from each data item
+        
+    Returns:
+        DataFrame with routing and structured data
+    """
+    texts = [item[text_field] for item in data]
+    
+    def extra_data_fn(text: str, text_id: int) -> dict[str, Any]:
+        """Extract extra data from structured item."""
+        item = data[text_id]
+        extra_data = {"item_id": text_id, "text": text}
+        
+        if extra_fields:
+            for field in extra_fields:
+                if field in item:
+                    extra_data[field] = item[field]
+        
+        return extra_data
+    
+    return process_texts(texts, extract_fn, extra_data_fn)
+
+
+def add_post_processing(df: pd.DataFrame, post_process_fn: Callable[[pd.DataFrame], pd.DataFrame]) -> pd.DataFrame:
+    """Apply post-processing function to DataFrame.
+    
+    Args:
+        df: Input DataFrame
+        post_process_fn: Function to apply post-processing
+        
+    Returns:
+        Post-processed DataFrame
+    """
+    return post_process_fn(df)
