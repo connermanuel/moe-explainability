@@ -1,155 +1,67 @@
 # %%
-"""Example script showing how to use general functions for UD dataset processing."""
+"""Example script showing how to use the new architecture for UD dataset processing."""
 
-import pandas as pd
 from datasets import load_dataset
 
-from moe_explainability.datasets.alignment import align_tokens
+from moe_explainability.datasets.configs import UD_ENGLISH_EWT
 from moe_explainability.datasets.processing import (
-    add_post_processing,
-    process_structured_data,
+    annotated_tokens_to_dataframe,
+    extract_and_align_routing_tokens,
 )
 from moe_explainability.models.configs import SWITCH_BASE_8
-from moe_explainability.models.loading import load_model
-from moe_explainability.routing.extraction import extract_tokens
-
+from moe_explainability.models.loading import create_extraction_fn
 
 # %%
-def add_word_alignment(df):
-    """Add word-level alignment to the DataFrame (UD-specific post-processing)."""
-    results = []
-
-    for item_id, group in df.groupby("item_id"):
-        # Get UD tokens for this sentence
-        ud_tokens = group.iloc[0]["tokens"]
-        if not ud_tokens:
-            # No UD tokens, add rows as-is
-            for _, row in group.iterrows():
-                row_dict = row.to_dict()
-                row_dict.update(
-                    {
-                        "word_index": -1,
-                        "word_text": "<no_ud_tokens>",
-                        "aligned_upos": None,
-                        "aligned_lemma": None,
-                        "aligned_deprel": None,
-                    }
-                )
-                results.append(row_dict)
-            continue
-
-        # Get tokenizer tokens
-        tokenizer_tokens = group["token_text"].tolist()
-        text = group.iloc[0]["text"]
-
-        # Align tokens
-        alignment = align_tokens(text, tokenizer_tokens, ud_tokens)
-
-        # Add alignment info to each token
-        for _, row in group.iterrows():
-            token_pos = row["position"]
-            ud_token_idx = alignment.tokenizer_to_sentence.get(token_pos, -1)
-
-            row_dict = row.to_dict()
-
-            if ud_token_idx >= 0 and ud_token_idx < len(ud_tokens):
-                # Successfully aligned
-                upos_list = row["upos"] if row["upos"] else []
-                lemmas_list = row["lemmas"] if row["lemmas"] else []
-                deprel_list = row["deprel"] if row["deprel"] else []
-
-                row_dict.update(
-                    {
-                        "word_index": ud_token_idx,
-                        "word_text": ud_tokens[ud_token_idx],
-                        "aligned_upos": upos_list[ud_token_idx]
-                        if ud_token_idx < len(upos_list)
-                        else None,
-                        "aligned_lemma": lemmas_list[ud_token_idx]
-                        if ud_token_idx < len(lemmas_list)
-                        else None,
-                        "aligned_deprel": deprel_list[ud_token_idx]
-                        if ud_token_idx < len(deprel_list)
-                        else None,
-                    }
-                )
-            else:
-                # Special token or unaligned
-                row_dict.update(
-                    {
-                        "word_index": -1,
-                        "word_text": "<special>",
-                        "aligned_upos": None,
-                        "aligned_lemma": None,
-                        "aligned_deprel": None,
-                    }
-                )
-
-            results.append(row_dict)
-
-    return pd.DataFrame(results)
-
-
-# %%
-print("=== UD Processing with General Functions ===")
+print("=== UD Processing with New Architecture ===")
 
 # Load UD dataset (small subset for demo)
 print("Loading UD dataset...")
 ud_data = load_dataset("universal_dependencies", "en_ewt", split="train[:5]")
 print(f"Loaded {len(ud_data)} sentences")
 
-# Load model
+# %%
+# Create extraction function (loads model automatically)
 print("Loading model...")
-model, tokenizer = load_model(SWITCH_BASE_8)
-
-
-# %%
-# Create extraction function
-def extract_fn(text):
-    """Extract routing tokens from text."""
-    return extract_tokens(model, tokenizer, text, SWITCH_BASE_8)
-
+extract_tokens_fn = create_extraction_fn(SWITCH_BASE_8)
 
 # %%
-# Use the GENERAL process_structured_data function
-print("Processing with general structured data function...")
-df = process_structured_data(
+# Process using new architecture
+print("Processing with new architecture...")
+annotated_tokens = extract_and_align_routing_tokens(
     data=list(ud_data),
-    text_field="text",
-    extract_fn=extract_fn,
-    extra_fields=["tokens", "upos", "lemmas", "deprel", "head", "feats"],
+    config=UD_ENGLISH_EWT,
+    extract_tokens_fn=extract_tokens_fn,
 )
 
-print(f"Initial DataFrame shape: {df.shape}")
-print(f"Columns: {df.columns.tolist()}")
+print(f"Processed {len(annotated_tokens)} tokens")
 
 # %%
-# Add word-level alignment using the general post-processing function
-print("Adding word-level alignment...")
-df_aligned = add_post_processing(df, add_word_alignment)
+# Convert to DataFrame for analysis
+print("Converting to DataFrame...")
+df = annotated_tokens_to_dataframe(annotated_tokens)
 
-print(f"Final DataFrame shape: {df_aligned.shape}")
-print(f"Final columns: {df_aligned.columns.tolist()}")
+print(f"DataFrame shape: {df.shape}")
+print(f"Columns: {df.columns.tolist()}")
 
 # %%
 # Show sample data
 print("\n=== Sample Data ===")
 sample_cols = [
-    "item_id",
+    "sentence_id",
     "token_text",
-    "position",
     "word_text",
-    "aligned_upos",
-    "aligned_lemma",
+    "upos",
+    "lemmas",
+    "deprel",
 ]
-available_cols = [col for col in sample_cols if col in df_aligned.columns]
-print(df_aligned[available_cols].head(10))
+available_cols = [col for col in sample_cols if col in df.columns]
+print(df[available_cols].head(10))
 
 # %%
 # Show alignment quality
 print("\n=== Alignment Quality ===")
-total_tokens = len(df_aligned)
-aligned_tokens = len(df_aligned[df_aligned["word_index"] >= 0])
+total_tokens = len(df)
+aligned_tokens = len(df[df["word_index"] >= 0])
 print(f"Total tokens: {total_tokens}")
 print(f"Aligned tokens: {aligned_tokens}")
 print(f"Alignment rate: {aligned_tokens / total_tokens:.2%}")
@@ -157,5 +69,20 @@ print(f"Alignment rate: {aligned_tokens / total_tokens:.2%}")
 # %%
 # Show POS distribution
 print("\n=== POS Distribution ===")
-pos_counts = df_aligned["aligned_upos"].value_counts().head(10)
+pos_counts = df["upos"].value_counts().head(10)
 print(pos_counts)
+
+# %%
+# Example: Work with AnnotatedToken objects directly
+print("\n=== Working with AnnotatedToken objects ===")
+# Find all NOUN tokens
+noun_tokens = [
+    token for token in annotated_tokens if token.word_fields.get("upos") == "NOUN"
+]
+print(f"Found {len(noun_tokens)} NOUN tokens")
+
+# Show routing patterns for first few NOUNs
+for i, token in enumerate(noun_tokens[:3]):
+    print(
+        f"NOUN {i + 1}: '{token.word_text}' -> route_vector shape: {token.token.get_route_vector().shape}"
+    )

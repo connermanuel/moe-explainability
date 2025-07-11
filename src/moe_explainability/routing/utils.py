@@ -2,7 +2,8 @@
 
 import functools
 import os
-from typing import Any, Callable, Optional
+import pickle
+from typing import Optional
 
 import pandas as pd
 
@@ -23,6 +24,30 @@ def cache_to_file(func):
             print(f"Caching result to {filename}")
             os.makedirs(os.path.dirname(filename), exist_ok=True)
             result.to_parquet(filename, compression="gzip" if compress else None)
+
+        return result
+
+    return wrapper
+
+
+def cache_annotated_tokens(func):
+    """Decorator to cache AnnotatedToken-returning functions to pickle files."""
+
+    @functools.wraps(func)
+    def wrapper(*args, filename: Optional[str] = None, **kwargs):
+        if filename and os.path.exists(filename):
+            print(f"Loading cached annotated tokens from {filename}")
+            with open(filename, 'rb') as f:
+                return pickle.load(f)
+
+        print(f"Computing {func.__name__}...")
+        result = func(*args, **kwargs)
+
+        if filename:
+            print(f"Caching annotated tokens to {filename}")
+            os.makedirs(os.path.dirname(filename), exist_ok=True)
+            with open(filename, 'wb') as f:
+                pickle.dump(result, f)
 
         return result
 
